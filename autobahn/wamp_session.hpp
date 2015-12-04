@@ -55,6 +55,7 @@
 #include <utility>
 #include <vector>
 
+
 #if defined(_WIN32) || defined(WIN32)
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -353,6 +354,9 @@ private:
 
     /// An unserialized, raw WAMP message.
     wamp_message m_message;
+
+    /// Buffer for incoming text messages
+    boost::asio::streambuf response;
 };
 
 } // namespace autobahn

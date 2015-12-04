@@ -56,6 +56,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdlib.h>
+#include <string>
 
 namespace autobahn {
 
@@ -87,22 +88,52 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
     m_handshake_buffer[2] = 0x00; // reserved
     m_handshake_buffer[3] = 0x00; // reserved
 
+    boost::asio::streambuf request;
+    std::ostream request_stream(&request);
+
+    request_stream << "GET / HTTP/1.1\r\n";
+    request_stream << "User-Agent: AutobahnCpp/0.10.9\r\n";
+    request_stream << "Host: 10.144.54.32:6060\r\n";
+    request_stream << "Upgrade: WebSocket\r\n";
+    request_stream << "Connection: Upgrade\r\n";
+    request_stream << "Pragma: no-cache\r\n";
+    request_stream << "Cache-Control: no-cache\r\n";
+    request_stream << "Sec-WebSocket-Key: I4zvKSAxIXzBpAidWDbiGw==\r\n";
+    request_stream << "Sec-WebSocket-Protocol: wamp.2.msgpack.batched,wamp.2.msgpack,wamp.2.json.batched,wamp.2.json\r\n";
+    request_stream << "Sec-WebSocket-Version: 13\r\n";
+    request_stream << "\r\n";
+
+//    boost::asio::write(
+//            m_out,
+//            boost::asio::buffer(m_handshake_buffer, sizeof(m_handshake_buffer)));
+
     boost::asio::write(
-            m_out,
-            boost::asio::buffer(m_handshake_buffer, sizeof(m_handshake_buffer)));
+                m_out,
+                request);
 
     std::weak_ptr<wamp_session<IStream, OStream>> weak_self = this->shared_from_this();
     auto handshake_reply = [=](const boost::system::error_code& error) {
         auto shared_self = weak_self.lock();
         if (shared_self) {
+            std::istream response_stream(&response);
+            std::string http;
+            unsigned int code;
+            response_stream >> http;
+            response_stream >> code;
+            if(!response_stream || http.substr(0, 5) != "HTTP/")
+                m_handshake_buffer[0] = 0;
+            std::cerr << http << std::endl;
+
             shared_self->got_handshake_reply(error);
         }
     };
 
     // Read the 4-byte reply from the server
-    boost::asio::async_read(
+    boost::asio::async_read_until(
         m_in,
-        boost::asio::buffer(m_handshake_buffer, sizeof(m_handshake_buffer)),
+        response,
+        "\r\n\r\n",
+//        boost::asio::buffer(m_handshake_buffer, sizeof(m_handshake_buffer)),
         boost::bind<void>(handshake_reply, boost::asio::placeholders::error));
 
     return m_handshake.get_future();
@@ -281,7 +312,17 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
     packer.pack(std::string("publisher"));
     packer.pack_map(0);
     packer.pack(std::string("subscriber"));
-    packer.pack_map(0);
+    packer.pack_map(1);
+    packer.pack("features");
+    packer.pack_map(3);
+    packer.pack("publisher_identification");
+    packer.pack(true);
+    packer.pack("pattern_based_subscription");
+    packer.pack(true);
+    packer.pack("subscription_revocation");
+    packer.pack(true);
+
+    std::cout << "packed" << std::endl;
 
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
 
@@ -726,8 +767,7 @@ void wamp_session<IStream, OStream>::process_challenge(const wamp_message& messa
     /////////////////////////////////////////
     }
     else if ( whatAuth == "ticket" ) {
-
-            // make the challenge object
+            // make the challenge object 
             challenge_object = wamp_challenge("ticket");
     }
     else {
@@ -742,7 +782,7 @@ void wamp_session<IStream, OStream>::process_challenge(const wamp_message& messa
 
     // call the context, to get a signature...
     (*context_response) = on_challenge( challenge_object ).then( [=]( boost::future<wamp_authenticate> fu_auth ) {
-        try {
+        try { 
             const wamp_authenticate sig = fu_auth.get();
 
             auto buffer = std::make_shared<msgpack::sbuffer>();
@@ -1266,7 +1306,6 @@ template<typename IStream, typename OStream>
 void wamp_session<IStream, OStream>::got_message(
         const msgpack::object& obj, msgpack::unique_ptr<msgpack::zone>&& zone)
 {
-
     if (obj.type != msgpack::type::ARRAY) {
         throw protocol_error("invalid message structure - message is not an array");
     }
