@@ -45,6 +45,9 @@
 
 #include "wamp_auth_utils.hpp"
 
+#include "websocketpp/processors/hybi13.hpp"
+#include "websocketpp/http/request.hpp"
+
 #if !(defined(_WIN32) || defined(WIN32))
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -71,6 +74,12 @@ wamp_session<IStream, OStream>::wamp_session(boost::asio::io_service& io, IStrea
     , m_goodbye_sent(false)
     , m_stopped(false)
 {
+    processor = websocketpp::lib::make_shared<
+                    websocketpp::processor::hybi13<
+                    websocketpp::config::core> >(false,
+                                                 false,
+                                                 nullptr,
+                                                 rng);
 }
 
 template<typename IStream, typename OStream>
@@ -88,28 +97,27 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
     m_handshake_buffer[2] = 0x00; // reserved
     m_handshake_buffer[3] = 0x00; // reserved
 
-    boost::asio::streambuf request;
-    std::ostream request_stream(&request);
-
-    request_stream << "GET / HTTP/1.1\r\n";
-    request_stream << "User-Agent: AutobahnCpp/0.10.9\r\n";
-    request_stream << "Host: 10.144.54.32:6060\r\n";
-    request_stream << "Upgrade: WebSocket\r\n";
-    request_stream << "Connection: Upgrade\r\n";
-    request_stream << "Pragma: no-cache\r\n";
-    request_stream << "Cache-Control: no-cache\r\n";
-    request_stream << "Sec-WebSocket-Key: I4zvKSAxIXzBpAidWDbiGw==\r\n";
-    request_stream << "Sec-WebSocket-Protocol: wamp.2.msgpack.batched,wamp.2.msgpack,wamp.2.json.batched,wamp.2.json\r\n";
-    request_stream << "Sec-WebSocket-Version: 13\r\n";
-    request_stream << "\r\n";
-
 //    boost::asio::write(
 //            m_out,
 //            boost::asio::buffer(m_handshake_buffer, sizeof(m_handshake_buffer)));
 
+    websocketpp::http::parser::request req;
+    auto uri = websocketpp::lib::make_shared<websocketpp::uri>(websocketpp::uri("ws://1.1.1.1:80/"));
+    std::vector<std::string> vec;
+    vec.push_back("wamp.2.msgpack.batched");
+    vec.push_back("wamp.2.msgpack");
+    vec.push_back("wamp.2.json.batched");
+    vec.push_back("wamp.2.json");
+
+    processor->client_handshake_request(req, uri, vec);
+
+    if (req.get_header("User-Agent") == "") {
+        req.replace_header("User-Agent", "AutobahnCpp");
+    }
+
     boost::asio::write(
                 m_out,
-                request);
+                boost::asio::buffer(req.raw().data(), req.raw().size()));
 
     std::weak_ptr<wamp_session<IStream, OStream>> weak_self = this->shared_from_this();
     auto handshake_reply = [=](const boost::system::error_code& error) {
@@ -122,9 +130,8 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
             response_stream >> code;
             if(!response_stream || http.substr(0, 5) != "HTTP/")
                 m_handshake_buffer[0] = 0;
-            std::cerr << http << std::endl;
-
-            shared_self->got_handshake_reply(error);
+//            shared_self->got_handshake_reply(error);
+            m_handshake.set_value(true);
         }
     };
 
@@ -321,8 +328,6 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
     packer.pack(true);
     packer.pack("subscription_revocation");
     packer.pack(true);
-
-    std::cout << "packed" << std::endl;
 
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
 
@@ -1411,7 +1416,6 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
         // write message length prefix
         uint32_t len = htonl(buffer->size());
         written += boost::asio::write(m_out, boost::asio::buffer((char*)&len, sizeof(len)));
-
         // write actual serialized message
         written += boost::asio::write(m_out, boost::asio::buffer(buffer->data(), buffer->size()));
 

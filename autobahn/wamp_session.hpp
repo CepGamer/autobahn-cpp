@@ -55,6 +55,8 @@
 #include <utility>
 #include <vector>
 
+#include "websocketpp/processors/hybi13.hpp"
+#include "websocketpp/config/core.hpp"
 
 #if defined(_WIN32) || defined(WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -355,8 +357,15 @@ private:
     /// An unserialized, raw WAMP message.
     wamp_message m_message;
 
-    /// Buffer for incoming text messages
+    /// Frame processor
+    websocketpp::lib::shared_ptr<
+        websocketpp::processor::hybi13<websocketpp::config::core>> processor;
+
+    /// Response buffer
     boost::asio::streambuf response;
+
+    /// rand gen
+    websocketpp::config::core::rng_type rng;
 };
 
 } // namespace autobahn
