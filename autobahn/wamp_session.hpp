@@ -297,7 +297,7 @@ private:
     uint32_t m_message_length;
 
     /// MsgPack unserialization unpacker.
-    msgpack::unpacker m_unpacker;
+    std::vector<char> m_unpacker;
 
     /// Last request ID of outgoing WAMP requests.
     std::atomic<uint64_t> m_request_id;

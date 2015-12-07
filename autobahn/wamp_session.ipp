@@ -56,6 +56,8 @@
 #endif
 
 #include <boost/system/error_code.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -313,12 +315,6 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
     msg << ",\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription\":true,\"subscription_revocation\":true}}";
 
     msg << "}}]" << (char)24;
-
-    packer.pack_array(2);
-    packer.pack_map(1);
-    packer.pack("A");
-    packer.pack("B");
-    packer.pack(msg.str());
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
 
     m_io.dispatch([=]() {
@@ -1253,11 +1249,11 @@ void wamp_session<IStream, OStream>::got_message_header(const boost::system::err
             std::cerr << "RX message (" << m_message_length << " octets) ..." << std::endl;
         }
 
+        m_unpacker.clear();
+        m_unpacker.resize(m_message_length);
         // read actual message
-        m_unpacker.reserve_buffer(m_message_length);
-
         boost::asio::async_read(m_in,
-            boost::asio::buffer(m_unpacker.buffer(), m_message_length),
+            boost::asio::buffer(m_unpacker, m_message_length),
             bind(&wamp_session<IStream, OStream>::got_message_body, this->shared_from_this(), boost::asio::placeholders::error));
     } else {
         // TODO: Well this is no good. The session will basically just become unresponsive
@@ -1274,22 +1270,33 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
             std::cerr << "RX message received." << std::endl;
         }
 
-        m_unpacker.buffer_consumed(m_message_length);
-        msgpack::unpacked result;
+        std::cout << m_unpacker.size() << std::endl;
 
-        while (m_unpacker.next(&result)) {
-            msgpack::object obj(result.get());
-
-            if (m_debug) {
-                std::cerr << "RX WAMP message: " << obj << std::endl;
+        std::function<void (boost::property_tree::ptree const&)> print = [&](boost::property_tree::ptree const& pt)
+        {
+            using boost::property_tree::ptree;
+            ptree::const_iterator end = pt.end();
+            for (ptree::const_iterator it = pt.begin(); it != end; ++it) {
+                std::cout << it->first << ": " << it->second.get_value<std::string>() << std::endl;
+                print(it->second);
             }
+        };
 
-            got_message(obj, std::move(result.zone()));
-        }
+        std::stringstream ss;
+        boost::property_tree::ptree pt;
+        boost::property_tree::read_json(ss, pt);
 
-        if (!m_stopped) {
-            receive_message();
-        }
+        print(pt);
+
+//        if (m_debug) {
+//            std::cerr << "RX WAMP message: " << obj << std::endl;
+//        }
+
+//        got_message(obj, std::move(result.zone()));
+
+//        if (!m_stopped) {
+//            receive_message();
+//        }
     } else {
         // TODO: Well this is no good. The session will basically just become unresponsive
         // at this point as we will no longer be trying to asynchronously receive messages.
@@ -1302,12 +1309,7 @@ template<typename IStream, typename OStream>
 void wamp_session<IStream, OStream>::got_message(
         const msgpack::object& obj, msgpack::unique_ptr<msgpack::zone>&& zone)
 {
-    if (obj.type != msgpack::type::ARRAY) {
-        throw protocol_error("invalid message structure - message is not an array");
-    }
-
     wamp_message message;
-    obj.convert(&message);
 
     if (message.size() < 1) {
         throw protocol_error("invalid message structure - missing message code");
