@@ -118,7 +118,9 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
                 m_out,
                 boost::asio::buffer(req.raw().data(), req.raw().size()));
 
-    auto nop = [=](const boost::system::error_code& error){return;};
+    auto nop = [=](const boost::system::error_code& error) {
+        receive_message();
+    };
 
     std::weak_ptr<wamp_session<IStream, OStream>> weak_self = this->shared_from_this();
     auto raise_reply = [=](const boost::system::error_code& error) {
@@ -130,9 +132,10 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
             response_stream >> http;
             response_stream >> code;
             m_handshake.set_value(!(!response_stream || http.substr(0, 5) != "HTTP/"));
-            boost::asio::async_read(
+            boost::asio::async_read_until(
                         m_in
                         , response
+                        , "\r\n\r\n"
                         , boost::bind<void>(nop, boost::asio::placeholders::error));
         }
     };
@@ -277,6 +280,8 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
     msg << '[' << (static_cast<int> (message_type::HELLO));
     msg << ",\"" << realm << '\"';
 
+    bool challenge = false;
+
     // set authentication data - if any given
     if ( !authmethods.empty() && !authid.empty() ) {
 
@@ -290,17 +295,16 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
         }
 
         msg << "]";
-    	// authid -> "principal"    
-//    	packer.pack(std::string("authid"));
-//    	packer.pack(std::string( authid ));
-    } 
-    else {
-//    	packer.pack_map(1);
+        challenge = true;
     }
-
-
+       
     // and "roles" entry -> { ..... }
-//    msg << ",\"roles\":{\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription\":true,\"subscription_revocation\":true}},\"publisher\":{\"features\":{\"publisher_identification\":true,\"publisher_exclusion\":true,\"subscriber_blackwhite_listing\":true}},\"caller\":{\"features\":{\"caller_identification\":true,\"progressive_call_results\":true}},\"callee\":{\"features\":{\"progressive_call_results\":true,\"pattern_based_registration\":true,\"registration_revocation\":true,\"shared_registration\":true,\"caller_identification\":true}}}}]";
+//    msg << ",\"roles\":{\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription"
+//        << "\":true,\"subscription_revocation\":true}},\"publisher\":{\"features\":{\"publisher_identification\":"
+//        << "true,\"publisher_exclusion\":true,\"subscriber_blackwhite_listing\":true}},\"caller\":{\"features\":{"
+//        << "\"caller_identification\":true,\"progressive_call_results\":true}},\"callee\":{\"features\":{\"progre"
+//        << "ssive_call_results\":true,\"pattern_based_registration\":true,\"registration_revocation\":true,\"shar"
+//        << "ed_registration\":true,\"caller_identification\":true}}}}]";
     msg << ",\"roles\":{";
 
     msg << "\"caller\":{\"features\":{\"call_timeout\":true}}";
@@ -310,6 +314,10 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
 
     msg << "}}]" << (char)24;
 
+    packer.pack_array(2);
+    packer.pack_map(1);
+    packer.pack("A");
+    packer.pack("B");
     packer.pack(msg.str());
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
 
@@ -1238,7 +1246,8 @@ template<typename IStream, typename OStream>
 void wamp_session<IStream, OStream>::got_message_header(const boost::system::error_code& error)
 {
     if (!error) {
-        m_message_length = ntohl(*((uint32_t*) &m_message_length_buffer));
+//        m_message_length = ntohl(*((uint32_t*) m_message_length_buffer[1]));
+        m_message_length = m_message_length_buffer[1];
 
         if (m_debug) {
             std::cerr << "RX message (" << m_message_length << " octets) ..." << std::endl;

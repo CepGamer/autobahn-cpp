@@ -293,7 +293,7 @@ private:
     /// Output stream this session runs on.
     OStream& m_out;
 
-    char m_message_length_buffer[4];
+    char m_message_length_buffer[2];
     uint32_t m_message_length;
 
     /// MsgPack unserialization unpacker.
