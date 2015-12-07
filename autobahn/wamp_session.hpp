@@ -366,6 +366,9 @@ private:
 
     /// rand gen
     websocketpp::config::core::rng_type rng;
+
+    /// Message Manager
+    websocketpp::config::core::con_msg_manager_type::ptr manager;
 };
 
 } // namespace autobahn

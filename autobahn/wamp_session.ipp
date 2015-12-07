@@ -47,6 +47,7 @@
 
 #include "websocketpp/processors/hybi13.hpp"
 #include "websocketpp/http/request.hpp"
+#include "websocketpp/config/core.hpp"
 
 #if !(defined(_WIN32) || defined(WIN32))
 #include <arpa/inet.h>
@@ -73,12 +74,13 @@ wamp_session<IStream, OStream>::wamp_session(boost::asio::io_service& io, IStrea
     , m_session_id(0)
     , m_goodbye_sent(false)
     , m_stopped(false)
+    , manager(new websocketpp::config::core::con_msg_manager_type())
 {
     processor = websocketpp::lib::make_shared<
                     websocketpp::processor::hybi13<
                     websocketpp::config::core> >(false,
                                                  false,
-                                                 nullptr,
+                                                 manager,
                                                  rng);
 }
 
@@ -96,10 +98,6 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
     m_handshake_buffer[1] = 0xF2; // we are ready to receive messages up to 2**24 octets and encoded using MsgPack
     m_handshake_buffer[2] = 0x00; // reserved
     m_handshake_buffer[3] = 0x00; // reserved
-
-//    boost::asio::write(
-//            m_out,
-//            boost::asio::buffer(m_handshake_buffer, sizeof(m_handshake_buffer)));
 
     websocketpp::http::parser::request req;
     auto uri = websocketpp::lib::make_shared<websocketpp::uri>(websocketpp::uri("ws://1.1.1.1:80/"));
@@ -128,10 +126,7 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
             unsigned int code;
             response_stream >> http;
             response_stream >> code;
-            if(!response_stream || http.substr(0, 5) != "HTTP/")
-                m_handshake_buffer[0] = 0;
-//            shared_self->got_handshake_reply(error);
-            m_handshake.set_value(true);
+            m_handshake.set_value(!(!response_stream || http.substr(0, 5) != "HTTP/"));
         }
     };
 
@@ -269,9 +264,9 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
         const std::string& realm,
         const std::vector<std::string>& authmethods, const std::string& authid)
 {
+    websocketpp::config::core::message_type::ptr message = manager->get_message();
     auto buffer = std::make_shared<msgpack::sbuffer>();
     msgpack::packer<msgpack::sbuffer> packer(*buffer);
-
     // [HELLO, Realm|uri, Details|dict]
     packer.pack_array(3);
 
@@ -341,7 +336,10 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
             throw protocol_error("session already joined");
         }
 
-        send(buffer);
+        message->set_payload(buffer->data());
+        processor->prepare_data_frame(message, message);
+
+//        send(buffer);
     });
 
     return m_session_join.get_future();
