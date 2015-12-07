@@ -48,6 +48,7 @@
 #include "websocketpp/processors/hybi13.hpp"
 #include "websocketpp/http/request.hpp"
 #include "websocketpp/config/core.hpp"
+#include "websocketpp/frame.hpp"
 
 #if !(defined(_WIN32) || defined(WIN32))
 #include <arpa/inet.h>
@@ -78,7 +79,7 @@ wamp_session<IStream, OStream>::wamp_session(boost::asio::io_service& io, IStrea
 {
     processor = websocketpp::lib::make_shared<
                     websocketpp::processor::hybi13<
-                    websocketpp::config::core> >(false,
+                    websocketpp::config::core> >(true,
                                                  false,
                                                  manager,
                                                  rng);
@@ -117,8 +118,10 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
                 m_out,
                 boost::asio::buffer(req.raw().data(), req.raw().size()));
 
+    auto nop = [=](const boost::system::error_code& error){return;};
+
     std::weak_ptr<wamp_session<IStream, OStream>> weak_self = this->shared_from_this();
-    auto handshake_reply = [=](const boost::system::error_code& error) {
+    auto raise_reply = [=](const boost::system::error_code& error) {
         auto shared_self = weak_self.lock();
         if (shared_self) {
             std::istream response_stream(&response);
@@ -127,16 +130,19 @@ boost::future<bool> wamp_session<IStream, OStream>::start()
             response_stream >> http;
             response_stream >> code;
             m_handshake.set_value(!(!response_stream || http.substr(0, 5) != "HTTP/"));
+            boost::asio::async_read(
+                        m_in
+                        , response
+                        , boost::bind<void>(nop, boost::asio::placeholders::error));
         }
     };
 
-    // Read the 4-byte reply from the server
+    // Upgrade the protocol
     boost::asio::async_read_until(
         m_in,
         response,
-        "\r\n\r\n",
-//        boost::asio::buffer(m_handshake_buffer, sizeof(m_handshake_buffer)),
-        boost::bind<void>(handshake_reply, boost::asio::placeholders::error));
+        "\r\n",
+        boost::bind<void>(raise_reply, boost::asio::placeholders::error));
 
     return m_handshake.get_future();
 }
@@ -264,66 +270,47 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
         const std::string& realm,
         const std::vector<std::string>& authmethods, const std::string& authid)
 {
-    websocketpp::config::core::message_type::ptr message = manager->get_message();
     auto buffer = std::make_shared<msgpack::sbuffer>();
     msgpack::packer<msgpack::sbuffer> packer(*buffer);
+    std::ostringstream msg;
     // [HELLO, Realm|uri, Details|dict]
-    packer.pack_array(3);
-
-    packer.pack(static_cast<int> (message_type::HELLO));
-    packer.pack(realm);
-
+    msg << '[' << (static_cast<int> (message_type::HELLO));
+    msg << ",\"" << realm << '\"';
 
     // set authentication data - if any given
     if ( !authmethods.empty() && !authid.empty() ) {
 
-    	packer.pack_map(3);
-
+        msg << ",{";
+    
     	// an "authmethods" entry -> [ "wampcra" , "ticket", ... ]
-    	packer.pack(std::string("authmethods"));
+        msg << "\"authmethods\":[";
     	packer.pack_array( authmethods.size() );
         for ( std::string am : authmethods ) {
-    	    packer.pack( am );
+            msg << '\"' << am << '\"';
         }
 
-    	// authid -> "principal"
-    	packer.pack(std::string("authid"));
-    	packer.pack(std::string( authid ));
-    }
+        msg << "]";
+    	// authid -> "principal"    
+//    	packer.pack(std::string("authid"));
+//    	packer.pack(std::string( authid ));
+    } 
     else {
-    	packer.pack_map(1);
+//    	packer.pack_map(1);
     }
 
 
     // and "roles" entry -> { ..... }
-    packer.pack(std::string("roles"));
+//    msg << ",\"roles\":{\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription\":true,\"subscription_revocation\":true}},\"publisher\":{\"features\":{\"publisher_identification\":true,\"publisher_exclusion\":true,\"subscriber_blackwhite_listing\":true}},\"caller\":{\"features\":{\"caller_identification\":true,\"progressive_call_results\":true}},\"callee\":{\"features\":{\"progressive_call_results\":true,\"pattern_based_registration\":true,\"registration_revocation\":true,\"shared_registration\":true,\"caller_identification\":true}}}}]";
+    msg << ",\"roles\":{";
 
-    packer.pack_map(4);
-    packer.pack(std::string("caller"));
-    packer.pack_map(1);
-    packer.pack("features");
-    packer.pack_map(1);
-    packer.pack("call_timeout");
-    packer.pack(true);
-    packer.pack(std::string("callee"));
-    packer.pack_map(1);
-    packer.pack("features");
-    packer.pack_map(1);
-    packer.pack("call_timeout");
-    packer.pack(true);
-    packer.pack(std::string("publisher"));
-    packer.pack_map(0);
-    packer.pack(std::string("subscriber"));
-    packer.pack_map(1);
-    packer.pack("features");
-    packer.pack_map(3);
-    packer.pack("publisher_identification");
-    packer.pack(true);
-    packer.pack("pattern_based_subscription");
-    packer.pack(true);
-    packer.pack("subscription_revocation");
-    packer.pack(true);
+    msg << "\"caller\":{\"features\":{\"call_timeout\":true}}";
+    msg << ",\"callee\":{\"features\":{\"call_timeout\":true}}";
+    msg << ",\"publisher\":{}";
+    msg << ",\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription\":true,\"subscription_revocation\":true}}";
 
+    msg << "}}]" << (char)24;
+
+    packer.pack(msg.str());
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
 
     m_io.dispatch([=]() {
@@ -336,10 +323,7 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
             throw protocol_error("session already joined");
         }
 
-        message->set_payload(buffer->data());
-        processor->prepare_data_frame(message, message);
-
-//        send(buffer);
+        send(buffer);
     });
 
     return m_session_join.get_future();
@@ -1409,16 +1393,23 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
         // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/const_buffer/const_buffer/overload2.html
         // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/async_write/overload1.html
 
+        websocketpp::config::core::message_type::ptr message = manager->get_message();
+        message->set_payload(buffer->data() + 4);
+        message->set_opcode(websocketpp::frame::opcode::TEXT);
+        auto x = processor->prepare_data_frame(message, message);
+
+        std::cerr << x << std::endl;
+
         std::size_t written = 0;
 
         // write message length prefix
-        uint32_t len = htonl(buffer->size());
-        written += boost::asio::write(m_out, boost::asio::buffer((char*)&len, sizeof(len)));
+//        uint32_t len = htonl(buffer->size());
+        written += boost::asio::write(m_out, boost::asio::buffer(message->get_header().c_str(), message->get_header().length()));
         // write actual serialized message
-        written += boost::asio::write(m_out, boost::asio::buffer(buffer->data(), buffer->size()));
+        written += boost::asio::write(m_out, boost::asio::buffer(message->get_payload(), message->get_payload().length()));
 
         if (m_debug) {
-            std::cerr << "TX message sent (" << written << " / " << (sizeof(len) + buffer->size()) << " octets)" << std::endl;
+//            std::cerr << "TX message sent (" << written << " / " << (sizeof(len) + buffer->size()) << " octets)" << std::endl;
         }
     } else {
         if (m_debug) {
