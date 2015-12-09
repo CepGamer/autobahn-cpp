@@ -275,8 +275,6 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
         const std::string& realm,
         const std::vector<std::string>& authmethods, const std::string& authid)
 {
-    auto buffer = std::make_shared<msgpack::sbuffer>();
-    msgpack::packer<msgpack::sbuffer> packer(*buffer);
     std::ostringstream msg;
     // [HELLO, Realm|uri, Details|dict]
     msg << '[' << (static_cast<int> (message_type::HELLO));
@@ -291,7 +289,7 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
     
     	// an "authmethods" entry -> [ "wampcra" , "ticket", ... ]
         msg << "\"authmethods\":[";
-    	packer.pack_array( authmethods.size() );
+//    	packer.pack_array( authmethods.size() );
         for ( std::string am : authmethods ) {
             msg << '\"' << am << '\"';
         }
@@ -314,21 +312,21 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
     msg << ",\"publisher\":{}";
     msg << ",\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription\":true,\"subscription_revocation\":true}}";
 
-    msg << "}}]" << (char)24;
+    msg << "}}]";
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
 
-    m_io.dispatch([=]() {
-        auto shared_self = weak_self.lock();
-        if (!shared_self) {
-            return;
-        }
+//    m_io.dispatch([=]() {
+//        auto shared_self = weak_self.lock();
+//        if (!shared_self) {
+//            return;
+//        }
 
-        if (m_session_id) {
-            throw protocol_error("session already joined");
-        }
+//        if (m_session_id) {
+//            throw protocol_error("session already joined");
+//        }
 
-        send(buffer);
-    });
+//    });
+    send(msg.str());
 
     return m_session_join.get_future();
 }
@@ -784,7 +782,8 @@ void wamp_session<IStream, OStream>::process_challenge(const wamp_message& messa
             packer.pack(static_cast<int>(message_type::AUTHENTICATE));
             packer.pack( sig.signature() );
             packer.pack_map(0);
-            send(buffer);
+//            send(buffer);
+            send("[5,\"" + sig.signature() + "\",{}]");
             // make sure the context_response is copied into this lambda...
             context_response.get();
         } catch (const std::exception& e) {
@@ -1270,33 +1269,70 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
             std::cerr << "RX message received." << std::endl;
         }
 
-        std::cout << m_unpacker.size() << std::endl;
-
-        std::function<void (boost::property_tree::ptree const&)> print = [&](boost::property_tree::ptree const& pt)
+        std::function<void (boost::property_tree::ptree const&
+                            , msgpack::packer<msgpack::sbuffer>&)> print = [&](boost::property_tree::ptree const& pt
+                                                                             , msgpack::packer<msgpack::sbuffer>& packer)
         {
             using boost::property_tree::ptree;
             ptree::const_iterator end = pt.end();
             for (ptree::const_iterator it = pt.begin(); it != end; ++it) {
-                std::cout << it->first << ": " << it->second.get_value<std::string>() << std::endl;
-                print(it->second);
+                if(!it->second.get_value<std::string>().empty())
+                {
+                    size_t idx = 0;
+                    int x = -1;
+                    try {
+                        x = std::stoi(it->second.get_value<std::string>(), &idx);
+                    } catch(...) {
+                    }
+                    if(x != -1)
+                        packer.pack(x);
+                    else
+                        packer.pack(it->second.get_value<std::string>());
+                }
+                else if(it->first.empty())
+                    packer.pack_array(it->second.size());
+                else
+                    packer.pack_map(it->second.size());
+                print(it->second, packer);
             }
         };
 
         std::stringstream ss;
         boost::property_tree::ptree pt;
+
+        ss << std::string(m_unpacker.begin(), m_unpacker.end() - 1);
+
         boost::property_tree::read_json(ss, pt);
 
-        print(pt);
+        auto buffer = std::make_shared<msgpack::sbuffer>();
+        msgpack::packer<msgpack::sbuffer> packer(*buffer);
 
-//        if (m_debug) {
-//            std::cerr << "RX WAMP message: " << obj << std::endl;
-//        }
+        packer.pack_array(pt.size());
+        print(pt, packer);
 
-//        got_message(obj, std::move(result.zone()));
+        msgpack::unpacker pac;
+        size_t len = strlen(buffer->data());
 
-//        if (!m_stopped) {
-//            receive_message();
-//        }
+        pac.reserve_buffer(len);
+
+        memcpy(pac.buffer(), buffer->data(), len);
+
+        pac.buffer_consumed(len);
+        msgpack::unpacked result;
+
+        while(pac.next(&result))
+        {
+            msgpack::object obj(result.get());
+
+            if (m_debug) {
+                std::cerr << "RX WAMP message: " << obj << std::endl;
+            }
+            got_message(obj, std::move(result.zone()));
+
+            if (!m_stopped) {
+                receive_message();
+            }
+        }
     } else {
         // TODO: Well this is no good. The session will basically just become unresponsive
         // at this point as we will no longer be trying to asynchronously receive messages.
@@ -1309,7 +1345,13 @@ template<typename IStream, typename OStream>
 void wamp_session<IStream, OStream>::got_message(
         const msgpack::object& obj, msgpack::unique_ptr<msgpack::zone>&& zone)
 {
+
+    if (obj.type != msgpack::type::ARRAY) {
+        throw protocol_error("invalid message structure - message is not an array");
+    }
+
     wamp_message message;
+    obj.convert(&message);
 
     if (message.size() < 1) {
         throw protocol_error("invalid message structure - missing message code");
@@ -1320,6 +1362,8 @@ void wamp_session<IStream, OStream>::got_message(
     }
 
     message_type code = static_cast<message_type>(message[0].as<int>());
+
+    std::cout << static_cast<int>(code) << std::endl;
 
     switch (code) {
         case message_type::HELLO:
@@ -1405,7 +1449,7 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
         // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/async_write/overload1.html
 
         websocketpp::config::core::message_type::ptr message = manager->get_message();
-        message->set_payload(buffer->data() + 4);
+        message->set_payload(buffer->data() + 3);
         message->set_opcode(websocketpp::frame::opcode::TEXT);
         auto x = processor->prepare_data_frame(message, message);
 
@@ -1429,6 +1473,45 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
     }
 }
 
+template<typename IStream, typename OStream>
+void wamp_session<IStream, OStream>::send(const std::string& buffer)
+{
+    if (!m_stopped) {
+        if (m_debug) {
+            std::cerr << "TX message (" << buffer.length() << " octets) ..." << std::endl;
+        }
+
+        // FIXME: rework this for queuing, async_write using gathered write
+        //
+        // boost::asio::write(m_out, std::vector<boost::asio::const_buffer>& out_vec, handler);
+
+        // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/const_buffer/const_buffer/overload2.html
+        // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/async_write/overload1.html
+
+        websocketpp::config::core::message_type::ptr message = manager->get_message();
+        message->set_payload(buffer + (char)24);
+        message->set_opcode(websocketpp::frame::opcode::TEXT);
+        auto x = processor->prepare_data_frame(message, message);
+
+        std::cerr << x << std::endl;
+
+        std::size_t written = 0;
+
+        // write message length prefix
+//        uint32_t len = htonl(buffer->size());
+        written += boost::asio::write(m_out, boost::asio::buffer(message->get_header().c_str(), message->get_header().length()));
+        // write actual serialized message
+        written += boost::asio::write(m_out, boost::asio::buffer(message->get_payload(), message->get_payload().length()));
+
+        if (m_debug) {
+//            std::cerr << "TX message sent (" << written << " / " << (sizeof(len) + buffer->size()) << " octets)" << std::endl;
+        }
+    } else {
+        if (m_debug) {
+            std::cerr << "TX message skipped since session stopped (" << buffer.length() << " octets)." << std::endl;
+        }
+    }
+}
 
 template<typename IStream, typename OStream>
 boost::future<wamp_authenticate> wamp_session<IStream, OStream>::on_challenge(const wamp_challenge& challenge) {

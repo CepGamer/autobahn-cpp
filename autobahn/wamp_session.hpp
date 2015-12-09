@@ -270,6 +270,7 @@ private:
 
     /// Send out message serialized in serialization buffer to ostream.
     void send(const std::shared_ptr<msgpack::sbuffer>& buffer);
+    void send(const std::string& payload);
 
     /// Receive one message from istream in m_unpacker.
     void receive_message();
