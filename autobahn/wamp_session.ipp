@@ -759,7 +759,7 @@ void wamp_session<IStream, OStream>::process_challenge(const wamp_message& messa
     /////////////////////////////////////////
     }
     else if ( whatAuth == "ticket" ) {
-            // make the challenge object 
+            // make the challenge object
             challenge_object = wamp_challenge("ticket");
     }
     else {
@@ -774,7 +774,7 @@ void wamp_session<IStream, OStream>::process_challenge(const wamp_message& messa
 
     // call the context, to get a signature...
     (*context_response) = on_challenge( challenge_object ).then( [=]( boost::future<wamp_authenticate> fu_auth ) {
-        try { 
+        try {
             const wamp_authenticate sig = fu_auth.get();
 
             auto buffer = std::make_shared<msgpack::sbuffer>();
@@ -1141,11 +1141,12 @@ void wamp_session<IStream, OStream>::process_event(const wamp_message& message)
         throw protocol_error("EVENT - length must be 4, 5 or 6");
     }
 
-    if (message[1].type != msgpack::type::POSITIVE_INTEGER) {
+    uint64_t subscription_id;
+    try{
+        subscription_id = std::stoull(message[1].as<std::string>());
+    } catch(...) {
         throw protocol_error("EVENT - SUBSCRIBED.Subscription must be an integer");
     }
-
-    uint64_t subscription_id = message[1].as<uint64_t>();
 
     auto subscription_handlers_itr = m_subscription_handlers.lower_bound(subscription_id);
     auto subscription_handlers_end = m_subscription_handlers.upper_bound(subscription_id);
@@ -1153,11 +1154,11 @@ void wamp_session<IStream, OStream>::process_event(const wamp_message& message)
     if (subscription_handlers_itr != m_subscription_handlers.end() &&
             subscription_handlers_itr != subscription_handlers_end) {
 
-        if (message[2].type != msgpack::type::POSITIVE_INTEGER) {
-            throw protocol_error("EVENT - PUBLISHED.Publication must be an id");
-        }
+//        if (message[2].type != msgpack::type::POSITIVE_INTEGER) {
+//            throw protocol_error("EVENT - PUBLISHED.Publication must be an id");
+//        }
 
-        //uint64_t publication_id = message[2].as<uint64_t>();
+//        uint64_t publication_id = message[2].as<uint64_t>();
 
         if (message[3].type != msgpack::type::MAP) {
             throw protocol_error("EVENT - Details must be a dictionary");
@@ -1280,7 +1281,6 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
         if (m_debug) {
             std::cerr << "RX message received." << std::endl;
         }
-
         std::function<void (boost::property_tree::ptree const&
                             , msgpack::packer<msgpack::sbuffer>&)> print = [&](boost::property_tree::ptree const& pt
                                                                              , msgpack::packer<msgpack::sbuffer>& packer)
@@ -1305,15 +1305,12 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
                         packer.pack(it->second.get_value<std::string>());
                 }
                 else if(it->second.begin()->first.empty())
+                {
                     packer.pack_array(it->second.size());
+                }
                 else
                 {
                     packer.pack_map(it->second.size());
-                }
-                if(it->first == "order")
-                {
-                    std::cout << it->second.begin()->first  << ' ' << it->second.size() << std::endl;
-                    return;
                 }
                 print(it->second, packer);
             }
@@ -1332,7 +1329,6 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
 
             packer.pack_array(pt.size());
             print(pt, packer);
-            std::cout << buffer->data() << std::endl;
             break;
         case websocketpp::frame::opcode::PING:
             ss << std::string(m_unpacker.begin(), m_unpacker.end());
@@ -1348,13 +1344,12 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
         }
 
         msgpack::unpacker pac;
-        size_t len = strlen(buffer->data());
 
-        pac.reserve_buffer(len);
+        pac.reserve_buffer(buffer->size());
 
-        memcpy(pac.buffer(), buffer->data(), len);
+        memcpy(pac.buffer(), buffer->data(), buffer->size());
 
-        pac.buffer_consumed(len);
+        pac.buffer_consumed(buffer->size());
         msgpack::unpacked result;
 
         if(pac.next(&result))
@@ -1488,7 +1483,7 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
 
         std::string payload;
         msgpack::unpacker pac;
-        size_t len = strlen(buffer->data());
+        size_t len = buffer->size();
 
         pac.reserve_buffer(len);
 
@@ -1511,12 +1506,9 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
         message->set_payload(payload);
         auto x = processor->prepare_data_frame(message, message);
 
-        std::cerr << x << std::endl;
-
         std::size_t written = 0;
 
         // write message length prefix
-//        uint32_t len = htonl(buffer->size());
         written += boost::asio::write(m_out, boost::asio::buffer(message->get_header().c_str(), message->get_header().length()));
         // write actual serialized message
         written += boost::asio::write(m_out, boost::asio::buffer(message->get_payload(), message->get_payload().length()));
