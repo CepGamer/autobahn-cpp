@@ -77,6 +77,7 @@ wamp_session<IStream, OStream>::wamp_session(boost::asio::io_service& io, IStrea
     , m_session_id(0)
     , m_goodbye_sent(false)
     , m_stopped(false)
+    , m_opcode(websocketpp::frame::opcode::TEXT)
     , manager(new websocketpp::config::core::con_msg_manager_type())
 {
     processor = websocketpp::lib::make_shared<
@@ -315,18 +316,20 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
     msg << "}}]";
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
 
-//    m_io.dispatch([=]() {
-//        auto shared_self = weak_self.lock();
-//        if (!shared_self) {
-//            return;
-//        }
+    auto str = msg.str();
 
-//        if (m_session_id) {
-//            throw protocol_error("session already joined");
-//        }
+    m_io.dispatch([=]() {
+        auto shared_self = weak_self.lock();
+        if (!shared_self) {
+            return;
+        }
 
-//    });
-    send(msg.str());
+        if (m_session_id) {
+            throw protocol_error("session already joined");
+        }
+
+        send(str);
+    });
 
     return m_session_join.get_future();
 }
@@ -1086,15 +1089,17 @@ void wamp_session<IStream, OStream>::process_subscribed(const wamp_message& mess
     if (message[1].type != msgpack::type::POSITIVE_INTEGER) {
         throw protocol_error("SUBSCRIBED - SUBSCRIBED.Request must be an integer");
     }
-
     uint64_t request_id = message[1].as<uint64_t>();
+
     auto subscribe_request_itr = m_subscribe_requests.find(request_id);
     if (subscribe_request_itr != m_subscribe_requests.end()) {
-        if (message[2].type != msgpack::type::POSITIVE_INTEGER) {
+        uint64_t subscription_id;
+        try{
+            subscription_id = std::stoull(message[2].as<std::string>());
+        } catch(...) {
             throw protocol_error("SUBSCRIBED - SUBSCRIBED.Subscription must be an integer");
         }
 
-        uint64_t subscription_id = message[2].as<uint64_t>();
         m_subscription_handlers.insert(std::make_pair(subscription_id, subscribe_request_itr->second->handler()));
         subscribe_request_itr->second->set_response(wamp_subscription(subscription_id));
         m_subscribe_requests.erase(request_id);
@@ -1242,6 +1247,7 @@ void wamp_session<IStream, OStream>::got_message_header(const boost::system::err
 {
     if (!error) {
 //        m_message_length = ntohl(*((uint32_t*) m_message_length_buffer[1]));
+        m_opcode = static_cast<websocketpp::frame::opcode::value>(m_message_length_buffer[0] & 15);
         m_message_length = m_message_length_buffer[1] & 127;
         if(m_message_length == 126)
         {
@@ -1298,8 +1304,17 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
                     else
                         packer.pack(it->second.get_value<std::string>());
                 }
+                else if(it->second.begin()->first.empty())
+                    packer.pack_array(it->second.size());
                 else
+                {
                     packer.pack_map(it->second.size());
+                }
+                if(it->first == "order")
+                {
+                    std::cout << it->second.begin()->first  << ' ' << it->second.size() << std::endl;
+                    return;
+                }
                 print(it->second, packer);
             }
         };
@@ -1307,20 +1322,33 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
         std::stringstream ss;
         boost::property_tree::ptree pt;
 
-        ss << std::string(m_unpacker.begin(), m_unpacker.end() - 1);
-
-        boost::property_tree::read_json(ss, pt);
-
         auto buffer = std::make_shared<msgpack::sbuffer>();
         msgpack::packer<msgpack::sbuffer> packer(*buffer);
 
-        packer.pack_array(pt.size());
-        print(pt, packer);
+        switch (m_opcode) {
+        case websocketpp::frame::opcode::TEXT:
+            ss << std::string(m_unpacker.begin(), m_unpacker.end() - 1);
+            boost::property_tree::read_json(ss, pt);
+
+            packer.pack_array(pt.size());
+            print(pt, packer);
+            std::cout << buffer->data() << std::endl;
+            break;
+        case websocketpp::frame::opcode::PING:
+            ss << std::string(m_unpacker.begin(), m_unpacker.end());
+            m_opcode = websocketpp::frame::opcode::PONG;
+            send(ss.str());
+            if (!m_stopped) {
+                receive_message();
+            }
+            return;
+            break;
+        default:
+            break;
+        }
 
         msgpack::unpacker pac;
         size_t len = strlen(buffer->data());
-
-        std::cout << buffer->data() << std::endl;
 
         pac.reserve_buffer(len);
 
@@ -1329,13 +1357,14 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
         pac.buffer_consumed(len);
         msgpack::unpacked result;
 
-        while(pac.next(&result))
+        if(pac.next(&result))
         {
             msgpack::object obj(result.get());
 
             if (m_debug) {
                 std::cerr << "RX WAMP message: " << obj << std::endl;
             }
+
             got_message(obj, std::move(result.zone()));
 
             if (!m_stopped) {
@@ -1355,7 +1384,7 @@ void wamp_session<IStream, OStream>::got_message(
         const msgpack::object& obj, msgpack::unique_ptr<msgpack::zone>&& zone)
 {
 
-    if (obj.type != msgpack::type::ARRAY) {
+    if (obj.type != msgpack::type::ARRAY && m_opcode == websocketpp::frame::opcode::TEXT) {
         throw protocol_error("invalid message structure - message is not an array");
     }
 
@@ -1456,8 +1485,30 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
         // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/async_write/overload1.html
 
         websocketpp::config::core::message_type::ptr message = manager->get_message();
-        message->set_payload(buffer->data() + 3);
-        message->set_opcode(websocketpp::frame::opcode::TEXT);
+
+        std::string payload;
+        msgpack::unpacker pac;
+        size_t len = strlen(buffer->data());
+
+        pac.reserve_buffer(len);
+
+        memcpy(pac.buffer(), buffer->data(), len);
+
+        pac.buffer_consumed(len);
+        msgpack::unpacked result;
+
+        if(pac.next(&result))
+        {
+            msgpack::object obj(result.get());
+            std::stringstream ss;
+            ss << obj;
+            payload = (m_opcode == websocketpp::frame::opcode::TEXT)
+                    ? (ss.str() + (char)24)
+                    : ss.str();
+        }
+
+        message->set_opcode(m_opcode);
+        message->set_payload(payload);
         auto x = processor->prepare_data_frame(message, message);
 
         std::cerr << x << std::endl;
@@ -1496,16 +1547,25 @@ void wamp_session<IStream, OStream>::send(const std::string& buffer)
         // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/async_write/overload1.html
 
         websocketpp::config::core::message_type::ptr message = manager->get_message();
-        message->set_payload(buffer + (char)24);
-        message->set_opcode(websocketpp::frame::opcode::TEXT);
-        auto x = processor->prepare_data_frame(message, message);
+        message->set_opcode(m_opcode);
+        message->set_payload((m_opcode == websocketpp::frame::opcode::TEXT)
+                             ? (buffer + (char)24)
+                             : buffer);
 
-        std::cerr << x << std::endl;
+        switch(m_opcode)
+        {
+        case websocketpp::frame::opcode::PONG:
+            processor->prepare_pong(message->get_payload(), message);
+            break;
+        case websocketpp::frame::opcode::TEXT:
+        default:
+            processor->prepare_data_frame(message, message);
+            break;
+        }
 
         std::size_t written = 0;
 
         // write message length prefix
-//        uint32_t len = htonl(buffer->size());
         written += boost::asio::write(m_out, boost::asio::buffer(message->get_header().c_str(), message->get_header().length()));
         // write actual serialized message
         written += boost::asio::write(m_out, boost::asio::buffer(message->get_payload(), message->get_payload().length()));

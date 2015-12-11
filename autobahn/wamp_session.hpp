@@ -370,6 +370,9 @@ private:
 
     /// Message Manager
     websocketpp::config::core::con_msg_manager_type::ptr manager;
+
+    /// Opcode
+    websocketpp::frame::opcode::value m_opcode;
 };
 
 } // namespace autobahn
