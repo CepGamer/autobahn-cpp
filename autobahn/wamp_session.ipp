@@ -798,7 +798,7 @@ void wamp_session<IStream, OStream>::process_challenge(const wamp_message& messa
 template<typename IStream, typename OStream>
 void wamp_session<IStream, OStream>::process_welcome(const wamp_message& message)
 {
-    m_session_id = message[1].as<uint64_t>();
+    m_session_id = std::stoull(message[1].as<std::string>());
     m_session_join.set_value(m_session_id);
 }
 
@@ -1242,7 +1242,13 @@ void wamp_session<IStream, OStream>::got_message_header(const boost::system::err
 {
     if (!error) {
 //        m_message_length = ntohl(*((uint32_t*) m_message_length_buffer[1]));
-        m_message_length = m_message_length_buffer[1];
+        m_message_length = m_message_length_buffer[1] & 127;
+        if(m_message_length == 126)
+        {
+            boost::asio::read(m_in
+                              , boost::asio::buffer(m_message_length_buffer, sizeof(m_message_length_buffer)));
+            m_message_length = static_cast<int>(m_message_length_buffer[0]) * 256 + static_cast<int>(m_message_length_buffer[1]);
+        }
 
         if (m_debug) {
             std::cerr << "RX message (" << m_message_length << " octets) ..." << std::endl;
@@ -1276,21 +1282,22 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
             using boost::property_tree::ptree;
             ptree::const_iterator end = pt.end();
             for (ptree::const_iterator it = pt.begin(); it != end; ++it) {
+                if(!it->first.empty())
+                    packer.pack(it->first);
                 if(!it->second.get_value<std::string>().empty())
                 {
                     size_t idx = 0;
-                    int x = -1;
+                    int x = 0;
                     try {
                         x = std::stoi(it->second.get_value<std::string>(), &idx);
-                    } catch(...) {
-                    }
-                    if(x != -1)
+                    } catch(...) {}
+                    if(idx != 0)
+                    {
                         packer.pack(x);
+                    }
                     else
                         packer.pack(it->second.get_value<std::string>());
                 }
-                else if(it->first.empty())
-                    packer.pack_array(it->second.size());
                 else
                     packer.pack_map(it->second.size());
                 print(it->second, packer);
@@ -1312,6 +1319,8 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
 
         msgpack::unpacker pac;
         size_t len = strlen(buffer->data());
+
+        std::cout << buffer->data() << std::endl;
 
         pac.reserve_buffer(len);
 
@@ -1362,8 +1371,6 @@ void wamp_session<IStream, OStream>::got_message(
     }
 
     message_type code = static_cast<message_type>(message[0].as<int>());
-
-    std::cout << static_cast<int>(code) << std::endl;
 
     switch (code) {
         case message_type::HELLO:
