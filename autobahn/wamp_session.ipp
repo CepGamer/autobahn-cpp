@@ -1254,7 +1254,7 @@ void wamp_session<IStream, OStream>::got_message_header(const boost::system::err
         {
             boost::asio::read(m_in
                               , boost::asio::buffer(m_message_length_buffer, sizeof(m_message_length_buffer)));
-            m_message_length = static_cast<int>(m_message_length_buffer[0]) * 256 + static_cast<int>(m_message_length_buffer[1]);
+            m_message_length = static_cast<int>(m_message_length_buffer[0]) * 256 + static_cast<uint8_t>(m_message_length_buffer[1]);
         }
 
         if (m_debug) {
@@ -1325,10 +1325,15 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
         switch (m_opcode) {
         case websocketpp::frame::opcode::TEXT:
             ss << std::string(m_unpacker.begin(), m_unpacker.end() - 1);
-            boost::property_tree::read_json(ss, pt);
+            try{
+                boost::property_tree::read_json(ss, pt);
 
-            packer.pack_array(pt.size());
-            print(pt, packer);
+                packer.pack_array(pt.size());
+                print(pt, packer);
+            } catch(boost::exception& e) {
+                std::cerr << ss.str() << std::endl;
+            }
+
             break;
         case websocketpp::frame::opcode::PING:
             ss << std::string(m_unpacker.begin(), m_unpacker.end());
@@ -1504,7 +1509,7 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
 
         message->set_opcode(m_opcode);
         message->set_payload(payload);
-        auto x = processor->prepare_data_frame(message, message);
+        processor->prepare_data_frame(message, message);
 
         std::size_t written = 0;
 
