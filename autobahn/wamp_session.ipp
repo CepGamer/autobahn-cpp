@@ -276,47 +276,56 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
         const std::string& realm,
         const std::vector<std::string>& authmethods, const std::string& authid)
 {
-    std::ostringstream msg;
+    auto buffer = std::make_shared<msgpack::sbuffer>();
+    msgpack::packer<msgpack::sbuffer> packer(*buffer);
+    
     // [HELLO, Realm|uri, Details|dict]
-    msg << '[' << (static_cast<int> (message_type::HELLO));
-    msg << ",\"" << realm << '\"';
-
-    bool challenge = false;
+    packer.pack_array(3);
+    
+    packer.pack(static_cast<int> (message_type::HELLO));
+    packer.pack(realm);
 
     // set authentication data - if any given
     if ( !authmethods.empty() && !authid.empty() ) {
+        packer.pack_map(3);
 
-        msg << ",{";
-    
-    	// an "authmethods" entry -> [ "wampcra" , "ticket", ... ]
-        msg << "\"authmethods\":[";
-//    	packer.pack_array( authmethods.size() );
+        // an "authmethods" entry -> [ "wampcra" , "ticket", ... ]
+        packer.pack(std::string("authmethods"));
+        packer.pack_array( authmethods.size() );
         for ( std::string am : authmethods ) {
-            msg << '\"' << am << '\"';
+            packer.pack(am);
         }
 
-        msg << "]";
-        challenge = true;
+        // authid -> "principal"
+    	packer.pack(std::string("authid"));
+    	packer.pack(std::string( authid ));
     }
-       
+    else {
+        packer.pack_map(1);
+    }
+
     // and "roles" entry -> { ..... }
-//    msg << ",\"roles\":{\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription"
-//        << "\":true,\"subscription_revocation\":true}},\"publisher\":{\"features\":{\"publisher_identification\":"
-//        << "true,\"publisher_exclusion\":true,\"subscriber_blackwhite_listing\":true}},\"caller\":{\"features\":{"
-//        << "\"caller_identification\":true,\"progressive_call_results\":true}},\"callee\":{\"features\":{\"progre"
-//        << "ssive_call_results\":true,\"pattern_based_registration\":true,\"registration_revocation\":true,\"shar"
-//        << "ed_registration\":true,\"caller_identification\":true}}}}]";
-    msg << ",\"roles\":{";
+    packer.pack(std::string("roles"));
 
-    msg << "\"caller\":{\"features\":{\"call_timeout\":true}}";
-    msg << ",\"callee\":{\"features\":{\"call_timeout\":true}}";
-    msg << ",\"publisher\":{}";
-    msg << ",\"subscriber\":{\"features\":{\"publisher_identification\":true,\"pattern_based_subscription\":true,\"subscription_revocation\":true}}";
-
-    msg << "}}]";
+    packer.pack_map(4);
+    packer.pack(std::string("caller"));
+    packer.pack_map(1);
+    packer.pack("features");
+    packer.pack_map(1);
+    packer.pack("call_timeout");
+    packer.pack(true);
+    packer.pack(std::string("callee"));
+    packer.pack_map(1);
+    packer.pack("features");
+    packer.pack_map(1);
+    packer.pack("call_timeout");
+    packer.pack(true);
+    packer.pack(std::string("publisher"));
+    packer.pack_map(0);
+    packer.pack(std::string("subscriber"));
+    packer.pack_map(0);
+    
     auto weak_self = std::weak_ptr<wamp_session>(this->shared_from_this());
-
-    auto str = msg.str();
 
     m_io.dispatch([=]() {
         auto shared_self = weak_self.lock();
@@ -328,7 +337,7 @@ boost::future<uint64_t> wamp_session<IStream, OStream>::join(
             throw protocol_error("session already joined");
         }
 
-        send(str);
+        send(buffer);
     });
 
     return m_session_join.get_future();
@@ -785,8 +794,7 @@ void wamp_session<IStream, OStream>::process_challenge(const wamp_message& messa
             packer.pack(static_cast<int>(message_type::AUTHENTICATE));
             packer.pack( sig.signature() );
             packer.pack_map(0);
-//            send(buffer);
-            send("[5,\"" + sig.signature() + "\",{}]");
+            send(buffer);
             // make sure the context_response is copied into this lambda...
             context_response.get();
         } catch (const std::exception& e) {
@@ -1338,7 +1346,8 @@ void wamp_session<IStream, OStream>::got_message_body(const boost::system::error
         case websocketpp::frame::opcode::PING:
             ss << std::string(m_unpacker.begin(), m_unpacker.end());
             m_opcode = websocketpp::frame::opcode::PONG;
-            send(ss.str());
+            packer.pack(ss.str());
+            send(buffer);
             if (!m_stopped) {
                 receive_message();
             }
@@ -1504,58 +1513,16 @@ void wamp_session<IStream, OStream>::send(const std::shared_ptr<msgpack::sbuffer
             ss << obj;
             payload = (m_opcode == websocketpp::frame::opcode::TEXT)
                     ? (ss.str() + (char)24)
-                    : ss.str();
+                    : obj.as<std::string>();
         }
 
         message->set_opcode(m_opcode);
-        message->set_payload(payload);
-        processor->prepare_data_frame(message, message);
-
-        std::size_t written = 0;
-
-        // write message length prefix
-        written += boost::asio::write(m_out, boost::asio::buffer(message->get_header().c_str(), message->get_header().length()));
-        // write actual serialized message
-        written += boost::asio::write(m_out, boost::asio::buffer(message->get_payload(), message->get_payload().length()));
-
-        if (m_debug) {
-//            std::cerr << "TX message sent (" << written << " / " << (sizeof(len) + buffer->size()) << " octets)" << std::endl;
-        }
-    } else {
-        if (m_debug) {
-            std::cerr << "TX message skipped since session stopped (" << buffer->size() << " octets)." << std::endl;
-        }
-    }
-}
-
-template<typename IStream, typename OStream>
-void wamp_session<IStream, OStream>::send(const std::string& buffer)
-{
-    if (!m_stopped) {
-        if (m_debug) {
-            std::cerr << "TX message (" << buffer.length() << " octets) ..." << std::endl;
-        }
-
-        // FIXME: rework this for queuing, async_write using gathered write
-        //
-        // boost::asio::write(m_out, std::vector<boost::asio::const_buffer>& out_vec, handler);
-
-        // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/const_buffer/const_buffer/overload2.html
-        // http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference/async_write/overload1.html
-
-        websocketpp::config::core::message_type::ptr message = manager->get_message();
-        message->set_opcode(m_opcode);
-        message->set_payload((m_opcode == websocketpp::frame::opcode::TEXT)
-                             ? (buffer + (char)24)
-                             : buffer);
-
-        switch(m_opcode)
-        {
+        switch (m_opcode) {
         case websocketpp::frame::opcode::PONG:
-            processor->prepare_pong(message->get_payload(), message);
+            processor->prepare_pong(payload, message);
             break;
         case websocketpp::frame::opcode::TEXT:
-        default:
+            message->set_payload(payload);
             processor->prepare_data_frame(message, message);
             break;
         }
@@ -1572,7 +1539,7 @@ void wamp_session<IStream, OStream>::send(const std::string& buffer)
         }
     } else {
         if (m_debug) {
-            std::cerr << "TX message skipped since session stopped (" << buffer.length() << " octets)." << std::endl;
+            std::cerr << "TX message skipped since session stopped (" << buffer->size() << " octets)." << std::endl;
         }
     }
 }
